@@ -1,7 +1,7 @@
 	.eqv	CHUNK_SIZE,	4096	# how much to read from file in one go
 	.eqv	FILENAME_SIZE,	256	# max file name length
 	.eqv	DICT_SIZE,	65536	# max entries in the LZW dictionary
-	.eqv	VARUINT_SIZE,	7	# how many bits are used in the output
+	.eqv	OUT_BITS,	16	# how many bits to use per output code
 	.eqv	PRINTI,		1
 	.eqv	PRINTS,		4
 	.eqv	READI,		5
@@ -50,10 +50,12 @@ main:
 	call	sanitize_str
 	call	read_file
 	mv	s0, a0		# s0 = src buffer
-	mv	s1, a1		# s1 = src len
+	mv	s1, zero	# s1 = src used length
+	mv	s2, zero	# s2 = src bit index
+	mv	s3, a1		# s3 = src total size
 	
-	li	s4, DICT_SIZE	# s4 = dict length
-	slli	s5, s4, 3	# s5 = byte dict size
+	li	s5, DICT_SIZE
+	slli	s5, s5, 3	# s5 = byte dict size
 	mv	a0, s5
 	li	a7, SBRK
 	ecall
@@ -70,25 +72,25 @@ memzero_end:
 	ecall
 	li	a7, READI
 	ecall
-	mv	s2, a0		# s2 = LZW mode
+	mv	s6, a0		# s6 = LZW mode
 	
-	li	s6, 0x01000193	# s6 = FNV_1a magic number
+	# s11 = return address save
 	
-	la	a0, pick_file
-	li	a1, 4
-	call	hash_get
-	li	a7, PRINTI
+	li	s10, CHUNK_SIZE	# s10 = output total size
+	mv	a0, s10
+	li	a7, SBRK
 	ecall
-	
-	la	a0, pick_file
-	li	a1, 4
-	call	hash_put
-	
-	la	a0, pick_file
-	li	a1, 4
-	call	hash_get
-	li	a7, PRINTI
-	ecall
+	mv	s7, a0		# s7 = output buffer
+	mv	s8, zero	# s8 = output used length
+	mv	s9, zero	# s9 = output bit index
+
+	addi	s6, s6, -1
+	beqz	s6, comp
+	call	decompress
+	b	after
+comp:
+	call	compress
+after:
 
 	la	a0, out_file
 	li	a7, PRINTS
@@ -98,8 +100,11 @@ memzero_end:
 	li	a7, READS
 	ecall
 	call	sanitize_str
-	mv	a1, s0
-	mv	a2, s1
+	mv	a1, s7
+	mv	a2, s8
+	addi	s9, s9, 7
+	srli	s9, s9, 3
+	add	s8, s8, s9
 	call	write_file
 	
 	exit
@@ -188,6 +193,7 @@ write_file:	# a0 = file name, a1 = buffer to write, a2 = buffer length
 	
 	
 fnv_1a:		# a0 = data ptr, a1 = length
+	li	a2, 0x01000193
 	li	a7, 0x811c9dc5
 	add	a5, a0, a1
 	lb	a4, (a5)
@@ -198,11 +204,11 @@ fnv_1a_loop:
 	beqz	a6, fnv_1a_end
 	addi	a3, a3, 1
 	xor	a7, a7, a6
-	mul	a7, a7, s6
+	mul	a7, a7, a2
 	b	fnv_1a_loop
 fnv_1a_end:
-	remu	a7, a7, s4
-	slli	a2, a7, 3
+	slli	a7, a7, 3
+	remu	a2, a7, s5
 	add	a3, a2, s3
 	sb	a4, (a5)
 	ret
@@ -259,6 +265,76 @@ hash_get_end:	# success
 	ret
 hash_get_no_end:
 	li	a0, 1
+	ret
+	
+	
+write_bits:	# a0 = number, a1 = bits
+	add	a2, s7, s8
+write_bits_loop:
+	beqz	a1, write_bits_end
+	lb	a4, (a2)
+	addi	a3, a1, -8
+	add	a3, a3, s9
+	bltz	a3, write_bits_negative
+	srl	a7, a0, a3
+	or	a4, a4, a7
+	sb	a4, (a2)
+	addi	a2, a2, 1
+	mv	s9, zero
+	mv	a1, a3
+	b	write_bits_loop
+write_bits_negative:
+	sub	a3, zero, a3
+	sll	a7, a0, a3
+	or	a4, a4, a7
+	sb	a4, (a2)
+	add	a5, a1, s9
+	srli	a6, a5, 3
+	add	a2, a2, a6
+	andi	s9, a5, 7
+write_bits_end:
+	sub	s8, a2, s7
+	ret
+	
+	
+read_bits:	# a0 = bits
+	mv	a1, zero
+	mv	a7, a0
+	add	a2, s0, s1
+read_bits_loop:
+	beqz	a0, read_bits_end
+	lb	a4, (a2)
+	addi	a3, a0, -8
+	add	a3, a3, s2
+	bltz	a3, read_bits_negative
+	sll	a4, a4, a3
+	or	a1, a1, a4
+	addi	a2, a2, 1
+	mv	s2, zero
+	mv	a0, a3
+	b	read_bits_loop
+read_bits_negative:
+	sub	a3, zero, a3
+	srl	a4, a4, a3
+	or	a1, a1, a4
+	add	a5, a0, s2
+	srli	a6, a5, 3
+	add	a2, a2, a6
+	andi	s2, a5, 7
+read_bits_end:
+	sub	s1, a2, s0
+	addi	a0, a0, 1
+	sll	a0, a0, a7
+	addi	a0, a0, -1
+	and	a0, a1, a0
+	ret
+	
+	
+compress:
+	ret
+	
+	
+decompress:
 	ret
 	
 	
