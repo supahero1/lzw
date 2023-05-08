@@ -22,8 +22,14 @@ pick_mode:	.asciz	"Do you want to compress (1) or decompress (2)?\n"
 file_err_str:	.asciz	"There was an error opening the given file.\n"
 file_op_str:	.asciz	"An error occured while operating on the given file.\n"
 out_file:	.asciz	"Output file name:\n"
-seed:		.space	2
+origin_table:	.space	256
 no_input:	.asciz	"The input is empty, nothing to do.\n"
+hgstr:		.asciz	"Getting from table:\n"
+hpstr:		.asciz	"Putting in table:\n"
+newline:	.asciz	"\n"
+hgy:		.asciz	"Found.\n"
+hgn:		.asciz	"Not found.\n"
+wbstr:		.asciz	"Writing on output:\n"
 
 
 	.macro exit
@@ -73,7 +79,7 @@ memzero_loop:
 memzero_end:
 	mv	s6, zero	# s6 = dict index
 	
-	# s11 = return address save
+	# s11 = return address save / temporary
 	
 	li	s10, CHUNK_SIZE	# s10 = output total size
 	mv	a0, s10
@@ -223,11 +229,12 @@ fnv_1a_end:
 	
 hash_put:	# a0 = data ptr, a1 = length
 	mv	s11, ra
+	call	hash_put_log
 	call	fnv_1a
 	mv	ra, s11
 hash_put_loop:
-	lw	t0, (a3)
-	bnez	t0, hash_put_cont
+	lw	a4, (a3)
+	bnez	a4, hash_put_cont
 	b	hash_put_end
 hash_put_cont:
 	addi	a2, a2, 12
@@ -244,23 +251,24 @@ hash_put_end:
 	
 hash_get:	# a0 = data ptr, a1 = length
 	mv	s11, ra
+	call	hash_get_log
 	call	fnv_1a
 	mv	ra, s11
 hash_get_loop:
-	lw	t0, (a3)
-	beqz	t0, hash_get_no_end
-	lw	t1, 4(a3)
-	bne	t1, a1, hash_get_next
-	add	t2, a0, a1
-	mv	t3, a0
+	lw	a4, (a3)
+	beqz	a4, hash_get_no_end
+	lw	a5, 4(a3)
+	bne	a5, a1, hash_get_next
+	add	s11, a0, a1
+	mv	a6, a0
 hash_get_memcmp:
-	lb	t4, (t0)
-	lb	t5, (t3)
-	sub	t4, t4, t5
-	bnez	t4, hash_get_next
-	addi	t0, t0, 1
-	beq	t0, t2, hash_get_end
-	addi	t3, t3, 1
+	lb	a7, (a4)
+	lb	tp, (a6)
+	sub	a7, a7, tp
+	bnez	a7, hash_get_next
+	addi	a6, a6, 1
+	beq	a6, s11, hash_get_end
+	addi	a4, a4, 1
 	b	hash_get_memcmp
 
 hash_get_next:
@@ -270,15 +278,45 @@ hash_get_next:
 	b	hash_get_loop
 	
 hash_get_end:	# success
-	mv	a0, zero
-	lw	a1, 8(a3)
+	mv	a2, zero
+	lw	a3, 8(a3)
+	
+	mv	a4, a0
+	la	a0, hgy
+	li	a7, PRINTS
+	ecall
+	mv	a0, a4
+	
 	ret
 hash_get_no_end:
-	li	a0, 1
+	li	a2, 1
+	
+	mv	a4, a0
+	la	a0, hgn
+	li	a7, PRINTS
+	ecall
+	mv	a0, a4
+	
 	ret
 	
 	
 write_bits:	# a0 = bits, a1 = number
+	mv	a2, a0
+	
+	la	a0, wbstr
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a1
+	li	a7, PRINTI
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a2
+
 	add	a2, s7, s8
 	
 	add	a3, s9, a0
@@ -355,7 +393,7 @@ read_bits_end:
 	
 	
 source:
-	la	a0, seed
+	la	a0, origin_table
 	li	a1, 1
 	mv	t5, ra
 	mv	t6, zero
@@ -365,6 +403,7 @@ source_loop:
 	addi	t6, t6, 1
 	andi	t6, t6, 0xff
 	beqz	t6, source_end
+	addi	a0, a0, 1
 	b	source_loop
 source_end:
 	mv	ra, t5
@@ -372,7 +411,6 @@ source_end:
 	
 	
 compress:
-	ebreak
 	mv	a0, s0
 	li	a1, 1
 	add	t0, s0, s3
@@ -380,27 +418,111 @@ compress:
 compress_loop:
 	add	t1, a0, a1
 	beq	t0, t1, compress_end
+	mv	t5, a1
 	addi	a1, a1, 1
 	call	hash_get		# TODO separate registers
-	beqz	a0, compress_loop
-	addi	a1, a1, -1
+	beqz	a2, compress_loop
+	mv	a1, t5
 	call	hash_get
+	
 	mv	t2, a0
+	mv	t4, a1
+	
 	li	a0, OUT_BITS
+	mv	a1, a3
 	call	write_bits
+	
 	mv	a0, t2
+	mv	a1, t4
+	
 	addi	a1, a1, 1
 	call	hash_put
+	
+	mv	a1, t5
+	add	a0, a0, a1
+	li	a1, 1
+	
 	b	compress_loop
 compress_end:
 	call	hash_get
 	li	a0, OUT_BITS
+	mv	a1, a3
 	call	write_bits
 	mv	ra, t6
 	ret
 	
 	
 decompress:
+	ret
+	
+	
+hash_get_log:
+	mv	a2, a0
+	mv	a3, a1
+	
+	add	a4, a0, a1
+	lb	a5, (a4)
+	sb	zero, (a4)
+	
+	la	a0, hgstr
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a2
+	li	a7, PRINTS
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a3
+	li	a7, PRINTI
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
+	
+	sb	a5, (a4)
+	
+	mv	a0, a2
+	mv	a1, a3
+	ret
+	
+	
+hash_put_log:
+	mv	a2, a0
+	mv	a3, a1
+	
+	add	a4, a0, a1
+	lb	a5, (a4)
+	sb	zero, (a4)
+	
+	la	a0, hpstr
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a2
+	li	a7, PRINTS
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, a3
+	li	a7, PRINTI
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
+	
+	sb	a5, (a4)
+	
+	mv	a0, a2
+	mv	a1, a3
 	ret
 	
 	
