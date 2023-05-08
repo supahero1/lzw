@@ -1,7 +1,7 @@
 	.eqv	CHUNK_SIZE,	4096	# how much to read from file in one go
 	.eqv	FILENAME_SIZE,	256	# max file name length
 	.eqv	DICT_SIZE,	65536	# max entries in the LZW dictionary
-	.eqv	LZW_BITS,	16	# how many bits to use per output code
+	.eqv	LZW_BITS,	10	# how many bits to use per output code
 	.eqv	PRINTI,		1
 	.eqv	PRINTS,		4
 	.eqv	READI,		5
@@ -24,12 +24,8 @@ file_op_str:	.asciz	"An error occured while operating on the given file.\n"
 out_file:	.asciz	"Output file name:\n"
 origin_table:	.space	256
 no_input:	.asciz	"The input is empty, nothing to do.\n"
-hgstr:		.asciz	"Getting from table:\n"
-hpstr:		.asciz	"Putting in table:\n"
+used_bits:	.asciz	"Dictionary space used:\n"
 newline:	.asciz	"\n"
-hgy:		.asciz	"Found.\n"
-hgn:		.asciz	"Not found.\n"
-wbstr:		.asciz	"Writing on output:\n"
 
 
 	.macro exit
@@ -100,6 +96,18 @@ memzero_end:
 	b	after
 comp:
 	call	compress
+	
+	la	a0, used_bits
+	li	a7, PRINTS
+	ecall
+	
+	mv	a0, s6
+	li	a7, PRINTI
+	ecall
+	
+	la	a0, newline
+	li	a7, PRINTS
+	ecall
 after:
 	
 	la	a0, out_file
@@ -124,9 +132,9 @@ sanitize_str:	# a0 = string
 	addi	t0, a0, -1
 sanitize_loop:
 	addi	t0, t0, 1
-	lb	t1, (t0)
-	xori	t1, t1, 0x0a
-	beqz	t1, sanitize_end
+	lb	tp, (t0)
+	xori	tp, tp, 0x0a
+	beqz	tp, sanitize_end
 	b	sanitize_loop
 sanitize_end:
 	sb	zero, (t0)
@@ -148,10 +156,10 @@ read_file:	# a0 = file name
 	li	a0, CHUNK_SIZE
 	li	a7, SBRK
 	ecall
-	mv	t1, a0
+	mv	tp, a0
 	
 	mv	a0, t0
-	mv	a1, t1
+	mv	a1, tp
 	li	a2, CHUNK_SIZE
 	li	t2, CHUNK_SIZE
 	li	a7, READ
@@ -174,15 +182,15 @@ read_end:
 	li	a7, CLOSE
 	ecall
 	
-	mv	a0, t1
-	sub	a1, a1, t1
+	mv	a0, tp
+	sub	a1, a1, tp
 	add	t0, a0, a1
 	sb	zero, (t0)
 	ret
 	
 	
 write_file:	# a0 = file name, a1 = buffer to write, a2 = buffer length
-	mv	t1, a1
+	mv	tp, a1
 	
 	li	a1, 1
 	li	a7, OPEN
@@ -190,7 +198,7 @@ write_file:	# a0 = file name, a1 = buffer to write, a2 = buffer length
 	blt	a0, zero, file_err
 	mv	t0, a0
 	
-	mv	a1, t1
+	mv	a1, tp
 	li	a7, WRITE
 	ecall
 	bne	a0, a2, file_op_err
@@ -206,28 +214,23 @@ fnv_1a:		# a0 = data ptr, a1 = length
 	li	a2, 0x01000193
 	li	a7, 0x811c9dc5
 	add	a5, a0, a1
-	lb	a4, (a5)
-	sb	zero, (a5)
 	mv	a3, a0
 fnv_1a_loop:
 	lb	a6, (a3)
-	beqz	a6, fnv_1a_end
-	addi	a3, a3, 1
 	xor	a7, a7, a6
 	mul	a7, a7, a2
-	b	fnv_1a_loop
-fnv_1a_end:
+	addi	a3, a3, 1
+	bne	a3, a5, fnv_1a_loop
+	
 	li	a6, 12
 	mul	a7, a6, a7
 	remu	a2, a7, s5
 	add	a3, a2, s4
-	sb	a4, (a5)
 	ret
 	
 	
 hash_put:	# a0 = data ptr, a1 = length
 	mv	s11, ra
-	call	hash_put_log
 	call	fnv_1a
 	mv	ra, s11
 hash_put_loop:
@@ -249,7 +252,6 @@ hash_put_end:
 	
 hash_get:	# a0 = data ptr, a1 = length
 	mv	s11, ra
-	call	hash_get_log
 	call	fnv_1a
 	mv	ra, s11
 hash_get_loop:
@@ -278,23 +280,9 @@ hash_get_next:
 hash_get_end:	# success
 	mv	a2, zero
 	lw	a3, 8(a3)
-	
-	mv	a4, a0
-	la	a0, hgy
-	li	a7, PRINTS
-	ecall
-	mv	a0, a4
-	
 	ret
 hash_get_no_end:
 	li	a2, 1
-	
-	mv	a4, a0
-	la	a0, hgn
-	li	a7, PRINTS
-	ecall
-	mv	a0, a4
-	
 	ret
 	
 	
@@ -357,10 +345,8 @@ create_entry_end:
 	
 write_str:	# a0 = data ptr, a1 = length
 	mv	a3, a0
-	mv	a4, s7
+	add	a4, s7, s8
 	add	a5, a0, a1
-	lb	a6, (a5)
-	sb	zero, (a5)
 	
 	add	a2, s8, a1
 	bgtu	a2, s10, write_str_resize
@@ -375,34 +361,16 @@ write_str_resize:
 	
 write_str_loop:
 	lb	a2, (a3)
-	beqz	a2, write_str_end
 	sb	a2, (a4)
 	addi	a3, a3, 1
 	addi	a4, a4, 1
-	b	write_str_loop
-write_str_end:
+	bne	a3, a5, write_str_loop
+
 	add	s8, s8, a1
-	sb	a6, (a5)
 	ret
 	
 	
 write_bits:	# a0 = bits, a1 = number
-	mv	a2, a0
-	
-	la	a0, wbstr
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a1
-	li	a7, PRINTI
-	ecall
-	
-	la	a0, newline
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a2
-	
 	add	a2, s7, s8
 	
 	add	a3, s9, a0
@@ -482,14 +450,13 @@ compress:
 	la	a0, origin_table
 	li	a1, 1
 	mv	t6, ra
-	mv	t1, zero
+	mv	t5, zero
 compress_source_loop:
-	sb	t1, (a0)
-	ebreak
+	sb	t5, (a0)
 	call	hash_put
-	addi	t1, t1, 1
-	andi	t1, t1, 0xff
-	beqz	t1, compress_source_end
+	addi	t5, t5, 1
+	andi	t5, t5, 0xff
+	beqz	t5, compress_source_end
 	addi	a0, a0, 1
 	b	compress_source_loop
 compress_source_end:
@@ -497,8 +464,8 @@ compress_source_end:
 	li	a1, 1
 	add	t0, s0, s3
 compress_loop:
-	add	t1, a0, a1
-	beq	t0, t1, compress_end
+	add	t5, a0, a1
+	beq	t0, t5, compress_end
 	mv	t5, a1
 	addi	a1, a1, 1
 	call	hash_get
@@ -561,7 +528,7 @@ decompress_loop:
 	call	str_get
 	mv	t3, a0
 	mv	t4, a1
-	ebreak
+	ebreak	# 
 	beqz	a0, decompress_sc
 	
 	mv	a2, a0
@@ -575,7 +542,7 @@ decompress_loop:
 decompress_sc:
 	mv	a2, t0
 	mv	a0, t0
-	mv	a1, t1
+	mv	a1, t2
 	call	create_entry
 	call	write_str
 decompress_next:
@@ -584,76 +551,6 @@ decompress_next:
 	b	decompress_loop
 decompress_end:
 	mv	ra, t6
-	ret
-	
-	
-hash_get_log:
-	mv	a2, a0
-	mv	a3, a1
-	
-	add	a4, a0, a1
-	lb	a5, (a4)
-	sb	zero, (a4)
-	
-	la	a0, hgstr
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a2
-	li	a7, PRINTS
-	ecall
-	
-	la	a0, newline
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a3
-	li	a7, PRINTI
-	ecall
-	
-	la	a0, newline
-	li	a7, PRINTS
-	ecall
-	
-	sb	a5, (a4)
-	
-	mv	a0, a2
-	mv	a1, a3
-	ret
-	
-	
-hash_put_log:
-	mv	a2, a0
-	mv	a3, a1
-	
-	add	a4, a0, a1
-	lb	a5, (a4)
-	sb	zero, (a4)
-	
-	la	a0, hpstr
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a2
-	li	a7, PRINTS
-	ecall
-	
-	la	a0, newline
-	li	a7, PRINTS
-	ecall
-	
-	mv	a0, a3
-	li	a7, PRINTI
-	ecall
-	
-	la	a0, newline
-	li	a7, PRINTS
-	ecall
-	
-	sb	a5, (a4)
-	
-	mv	a0, a2
-	mv	a1, a3
 	ret
 	
 	
