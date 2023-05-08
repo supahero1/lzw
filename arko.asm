@@ -1,7 +1,7 @@
 	.eqv	CHUNK_SIZE,	4096	# how much to read from file in one go
 	.eqv	FILENAME_SIZE,	256	# max file name length
 	.eqv	DICT_SIZE,	65536	# max entries in the LZW dictionary
-	.eqv	OUT_BITS,	16	# how many bits to use per output code
+	.eqv	LZW_BITS,	16	# how many bits to use per output code
 	.eqv	PRINTI,		1
 	.eqv	PRINTS,		4
 	.eqv	READI,		5
@@ -75,7 +75,7 @@ main:
 memzero_loop:
 	beq	a0, t0, memzero_end
 	sw	zero, (a0)
-	addi	a0, a0, 12	# only zero ptr in the struct
+	addi	a0, a0, 4
 memzero_end:
 	mv	s6, zero	# s6 = dict index
 	
@@ -88,9 +88,7 @@ memzero_end:
 	mv	s7, a0		# s7 = output buffer
 	mv	s8, zero	# s8 = output used length
 	mv	s9, zero	# s9 = output bit index
-
-	call	source
-
+	
 	la	a0, pick_mode
 	li	a7, PRINTS
 	ecall
@@ -103,7 +101,7 @@ memzero_end:
 comp:
 	call	compress
 after:
-
+	
 	la	a0, out_file
 	li	a7, PRINTS
 	ecall
@@ -270,7 +268,7 @@ hash_get_memcmp:
 	beq	a6, s11, hash_get_end
 	addi	a4, a4, 1
 	b	hash_get_memcmp
-
+	
 hash_get_next:
 	addi	a2, a2, 12
 	remu	a2, a2, s5
@@ -300,6 +298,94 @@ hash_get_no_end:
 	ret
 	
 	
+can_read:	# a0 = bits
+	add	a1, s2, a0
+	srli	a1, a1, 3
+	add	a1, a1, s1
+	bleu	a1, s3, can_read_skip
+	mv	a0, zero
+can_read_skip:
+	ret
+	
+	
+str_put:	# a0 = data ptr, a1 = length
+	add	a2, s4, s6
+	addi	s6, s6, 8
+	sw	a0, (a2)
+	sw	a1, 4(a2)
+	ret
+	
+	
+str_get:	# a0 = code
+	bgeu	a0, s6, str_get_fail
+	slli	a1, a0, 3
+	add	a1, a1, s4
+	lw	a0, (a1)
+	lw	a1, 4(a1)
+	ret
+str_get_fail:
+	mv	a0, zero
+	mv	a1, zero
+	ret
+	
+	
+create_entry:	# a0 = first str, a1 = first str length, a2 = second str
+	lb	a2, (a2)
+	sb	a2, -1(sp)
+	addi	a2, a1, 1
+	sub	sp, sp, a2
+	add	a3, s4, s6
+	addi	s6, s6, 8
+	sw	sp, (a3)
+	sw	a2, 4(a3)
+	mv	a4, sp
+	mv	a5, a2
+	add	a1, a0, a1
+	mv	a2, sp
+create_entry_loop:
+	beq	a0, a1, create_entry_end
+	lb	a3, (a0)
+	sb	a3, (a2)
+	addi	a0, a0, 1
+	addi	a2, a2, 1
+	b	create_entry_loop
+create_entry_end:
+	mv	a0, a4
+	mv	a1, a5
+	ret
+	
+	
+write_str:	# a0 = data ptr, a1 = length
+	mv	a3, a0
+	mv	a4, s7
+	add	a5, a0, a1
+	lb	a6, (a5)
+	sb	zero, (a5)
+	
+	add	a2, s8, a1
+	bgtu	a2, s10, write_str_resize
+	b	write_str_loop
+write_str_resize:
+	mv	a2, a0
+	li	a0, CHUNK_SIZE
+	add	s10, s10, a0
+	li	a6, SBRK
+	ecall
+	mv	a0, a2
+	
+write_str_loop:
+	lb	a2, (a3)
+	beqz	a2, write_str_end
+	sb	a2, (a4)
+	addi	a3, a3, 1
+	addi	a4, a4, 1
+	b	write_str_loop
+write_str_end:
+	add	s8, s8, a1
+	sb	a6, (a5)
+	ret
+	
+	
 write_bits:	# a0 = bits, a1 = number
 	mv	a2, a0
 	
@@ -316,7 +402,7 @@ write_bits:	# a0 = bits, a1 = number
 	ecall
 	
 	mv	a0, a2
-
+	
 	add	a2, s7, s8
 	
 	add	a3, s9, a0
@@ -325,12 +411,12 @@ write_bits:	# a0 = bits, a1 = number
 	bgtu	a3, s10, write_bits_resize
 	b	write_bits_loop
 write_bits_resize:
-	mv	a3, a1
-	li	a1, CHUNK_SIZE
-	add	s10, s10, a1
+	mv	a3, a0
+	li	a0, CHUNK_SIZE
+	add	s10, s10, a0
 	li	a7, SBRK
 	ecall
-	mv	a1, a3
+	mv	a0, a3
 	
 write_bits_loop:
 	beqz	a0, write_bits_end
@@ -357,8 +443,8 @@ write_bits_negative:
 write_bits_end:
 	sub	s8, a2, s7
 	ret
-	
-	
+
+
 read_bits:	# a0 = bits
 	mv	a1, zero
 	mv	a7, a0
@@ -392,35 +478,30 @@ read_bits_end:
 	ret
 	
 	
-source:
+compress:
 	la	a0, origin_table
 	li	a1, 1
-	mv	t5, ra
-	mv	t6, zero
-source_loop:
-	sb	t6, (a0)
+	mv	t6, ra
+	mv	t1, zero
+compress_source_loop:
+	sb	t1, (a0)
+	ebreak
 	call	hash_put
-	addi	t6, t6, 1
-	andi	t6, t6, 0xff
-	beqz	t6, source_end
+	addi	t1, t1, 1
+	andi	t1, t1, 0xff
+	beqz	t1, compress_source_end
 	addi	a0, a0, 1
-	b	source_loop
-source_end:
-	mv	ra, t5
-	ret
-	
-	
-compress:
+	b	compress_source_loop
+compress_source_end:
 	mv	a0, s0
 	li	a1, 1
 	add	t0, s0, s3
-	mv	t6, ra
 compress_loop:
 	add	t1, a0, a1
 	beq	t0, t1, compress_end
 	mv	t5, a1
 	addi	a1, a1, 1
-	call	hash_get		# TODO separate registers
+	call	hash_get
 	beqz	a2, compress_loop
 	mv	a1, t5
 	call	hash_get
@@ -428,7 +509,7 @@ compress_loop:
 	mv	t2, a0
 	mv	t4, a1
 	
-	li	a0, OUT_BITS
+	li	a0, LZW_BITS
 	mv	a1, a3
 	call	write_bits
 	
@@ -445,7 +526,7 @@ compress_loop:
 	b	compress_loop
 compress_end:
 	call	hash_get
-	li	a0, OUT_BITS
+	li	a0, LZW_BITS
 	mv	a1, a3
 	call	write_bits
 	mv	ra, t6
@@ -453,6 +534,56 @@ compress_end:
 	
 	
 decompress:
+	la	a0, origin_table
+	li	a1, 1
+	mv	t6, ra
+	mv	t0, zero
+decompress_source_loop:
+	sb	t0, (a0)
+	call	str_put
+	addi	t0, t0, 1
+	andi	t0, t0, 0xff
+	beqz	t0, decompress_source_end
+	addi	a0, a0, 1
+	b	decompress_source_loop
+decompress_source_end:
+	li	a0, LZW_BITS
+	call	read_bits
+	call	str_get
+	mv	t0, a0
+	mv	t2, a1
+	call	write_str
+decompress_loop:
+	li	a0, LZW_BITS
+	call	can_read
+	beqz	a0, decompress_end
+	call	read_bits
+	call	str_get
+	mv	t3, a0
+	mv	t4, a1
+	ebreak
+	beqz	a0, decompress_sc
+	
+	mv	a2, a0
+	mv	a0, t0
+	mv	a1, t2
+	call	create_entry
+	mv	a0, t3
+	mv	a1, t4
+	call	write_str
+	b	decompress_next
+decompress_sc:
+	mv	a2, t0
+	mv	a0, t0
+	mv	a1, t1
+	call	create_entry
+	call	write_str
+decompress_next:
+	mv	t0, t3
+	mv	t2, t4
+	b	decompress_loop
+decompress_end:
+	mv	ra, t6
 	ret
 	
 	
@@ -531,6 +662,6 @@ file_err:
 
 file_op_err:
 	exit_with_str (file_op_str)
-	
+
 input_empty:
 	exit_with_str (no_input)
