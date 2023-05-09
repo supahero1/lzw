@@ -1,7 +1,7 @@
 	.eqv	CHUNK_SIZE,	4096	# how much to read from file in one go
 	.eqv	FILENAME_SIZE,	256	# max file name length
 	.eqv	DICT_SIZE,	65536	# max entries in the LZW dictionary
-	.eqv	LZW_BITS,	10	# how many bits to use per output code
+	.eqv	LZW_BITS,	11	# how many bits to use per output code
 	.eqv	PRINTI,		1
 	.eqv	PRINTS,		4
 	.eqv	READI,		5
@@ -420,6 +420,7 @@ read_bits:	# a0 = bits
 read_bits_loop:
 	beqz	a0, read_bits_end
 	lb	a4, (a2)
+	andi	a4, a4, 0xff
 	addi	a3, a0, -8
 	add	a3, a3, s2
 	bltz	a3, read_bits_negative
@@ -439,7 +440,7 @@ read_bits_negative:
 	andi	s2, a5, 7
 read_bits_end:
 	sub	s1, a2, s0
-	addi	a0, a0, 1
+	li	a0, 1
 	sll	a0, a0, a7
 	addi	a0, a0, -1
 	and	a0, a1, a0
@@ -525,10 +526,10 @@ decompress_loop:
 	call	can_read
 	beqz	a0, decompress_end
 	call	read_bits
+	mv	t5, a0
 	call	str_get
 	mv	t3, a0
 	mv	t4, a1
-	ebreak	# 
 	beqz	a0, decompress_sc
 	
 	mv	a2, a0
@@ -545,6 +546,10 @@ decompress_sc:
 	mv	a1, t2
 	call	create_entry
 	call	write_str
+	mv	a0, t5
+	call	str_get
+	mv	t3, a0
+	mv	t4, a1
 decompress_next:
 	mv	t0, t3
 	mv	t2, t4
